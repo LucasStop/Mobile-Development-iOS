@@ -5,50 +5,75 @@ import UIKit
 final class CircleButton: UIButton {
 
     enum Estilo {
-        case numero      // cinza escuro
-        case funcao      // cinza claro (AC, %, ⌫)
-        case operacao    // laranja (÷ × − + =)
+        case numero       // cinza escuro
+        case funcao       // cinza claro (AC, %, ⌫, etc.)
+        case operacao     // laranja (÷ × − + =)
+        case cientifico   // cinza muito escuro (sci buttons)
     }
 
     private let estilo: Estilo
+    private var pillShape: Bool = false
 
-    init(titulo: String, estilo: Estilo) {
+    init(titulo: String, estilo: Estilo, pillShape: Bool = false) {
         self.estilo = estilo
+        self.pillShape = pillShape
         super.init(frame: .zero)
         configurar(titulo: titulo)
     }
 
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) não implementado")
-    }
+    required init?(coder: NSCoder) { fatalError() }
 
     private func configurar(titulo: String) {
         setTitle(titulo, for: .normal)
-        titleLabel?.font = .systemFont(ofSize: 32, weight: .regular)
+        titleLabel?.adjustsFontSizeToFitWidth = true
+        titleLabel?.minimumScaleFactor = 0.5
+        titleLabel?.lineBreakMode = .byClipping
+        titleLabel?.numberOfLines = 1
+        contentEdgeInsets = UIEdgeInsets(top: 0, left: 6, bottom: 0, right: 6)
+
         switch estilo {
         case .numero:
             backgroundColor = UIColor(white: 0.20, alpha: 1)
             setTitleColor(.white, for: .normal)
+            titleLabel?.font = .systemFont(ofSize: 32, weight: .regular)
         case .funcao:
             backgroundColor = UIColor(white: 0.65, alpha: 1)
             setTitleColor(.black, for: .normal)
-            titleLabel?.font = .systemFont(ofSize: 28, weight: .regular)
+            titleLabel?.font = .systemFont(ofSize: 26, weight: .regular)
         case .operacao:
             backgroundColor = UIColor(red: 1.0, green: 0.62, blue: 0.04, alpha: 1)
             setTitleColor(.white, for: .normal)
-            titleLabel?.font = .systemFont(ofSize: 36, weight: .regular)
+            titleLabel?.font = .systemFont(ofSize: 32, weight: .regular)
+        case .cientifico:
+            backgroundColor = UIColor(white: 0.30, alpha: 1)
+            setTitleColor(.white, for: .normal)
+            titleLabel?.font = .systemFont(ofSize: 18, weight: .regular)
+        }
+    }
+
+    /// Marca o botão como "selecionado" (operação pendente / 2nd ativo)
+    func definirSelecionado(_ selecionado: Bool) {
+        guard estilo == .operacao || estilo == .cientifico else { return }
+        if selecionado {
+            backgroundColor = .white
+            setTitleColor(estilo == .operacao
+                          ? UIColor(red: 1.0, green: 0.62, blue: 0.04, alpha: 1)
+                          : .black,
+                          for: .normal)
+        } else {
+            configurar(titulo: currentTitle ?? "")
         }
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        layer.cornerRadius = bounds.height / 2  // círculo perfeito
+        layer.cornerRadius = pillShape ? min(bounds.height, bounds.width) / 2
+                                       : bounds.height / 2
     }
 
-    // Feedback visual ao tocar
     override var isHighlighted: Bool {
         didSet {
-            UIView.animate(withDuration: 0.1) {
+            UIView.animate(withDuration: 0.08) {
                 self.alpha = self.isHighlighted ? 0.6 : 1.0
             }
         }
@@ -59,16 +84,18 @@ final class CircleButton: UIButton {
 
 class ViewController: UIViewController {
 
-    // MARK: UI
+    private let engine = CalculatorEngine()
+
+    // MARK: UI - Display
 
     private let lblExpressao: UILabel = {
         let l = UILabel()
         l.text = " "
-        l.textColor = UIColor(white: 1, alpha: 0.4)
-        l.font = .systemFont(ofSize: 28, weight: .light)
+        l.textColor = UIColor(white: 1, alpha: 0.45)
+        l.font = .systemFont(ofSize: 24, weight: .light)
         l.textAlignment = .right
         l.adjustsFontSizeToFitWidth = true
-        l.minimumScaleFactor = 0.5
+        l.minimumScaleFactor = 0.4
         return l
     }()
 
@@ -79,239 +106,485 @@ class ViewController: UIViewController {
         l.font = .systemFont(ofSize: 80, weight: .light)
         l.textAlignment = .right
         l.adjustsFontSizeToFitWidth = true
-        l.minimumScaleFactor = 0.4
+        l.minimumScaleFactor = 0.35
         l.numberOfLines = 1
         return l
     }()
 
-    // MARK: Estado da calculadora
+    private let lblIndicadores: UILabel = {
+        let l = UILabel()
+        l.text = ""
+        l.textColor = UIColor(red: 1.0, green: 0.62, blue: 0.04, alpha: 1)
+        l.font = .systemFont(ofSize: 14, weight: .semibold)
+        l.textAlignment = .left
+        return l
+    }()
 
-    private enum Operacao: String {
-        case soma = "+"
-        case sub  = "−"
-        case mult = "×"
-        case div  = "÷"
+    private lazy var btnHistorico: UIButton = {
+        let b = UIButton(type: .system)
+        let img = UIImage(systemName: "clock.arrow.circlepath")
+        b.setImage(img, for: .normal)
+        b.tintColor = UIColor(red: 1.0, green: 0.62, blue: 0.04, alpha: 1)
+        b.addTarget(self, action: #selector(tocouHistorico), for: .touchUpInside)
+        b.translatesAutoresizingMaskIntoConstraints = false
+        return b
+    }()
 
-        func aplicar(_ a: Double, _ b: Double) -> Double {
-            switch self {
-            case .soma: return a + b
-            case .sub:  return a - b
-            case .mult: return a * b
-            case .div:  return a / b
-            }
-        }
-    }
+    // MARK: Containers para teclados
 
-    private var valorAnterior: Double?
-    private var operacaoPendente: Operacao?
-    private var digitandoNumeroNovo: Bool = true
+    private var stackRetrato: UIStackView?
+    private var stackPaisagem: UIStackView?
+    private var teclaACClear: CircleButton?    // muda entre AC e C
+    private var teclaSegunda: CircleButton?    // 2nd toggle
+    private var teclaRadDeg: CircleButton?     // mostra Rad ou Deg
+
+    private var botoesOperacao: [String: CircleButton] = [:]      // para destacar a pendente
+    private var botoesUnariosTrig: [String: CircleButton] = [:]   // para trocar quando 2nd ativa
+
+    private var operacaoDestacada: String?
+
+    // Compose top bar (indicadores, expressão, display, histórico)
+    private var topStack: UIStackView!
 
     // MARK: Ciclo de vida
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
-        montarInterface()
+        montarTopo()
+        montarTecladoRetrato()
+        montarTecladoPaisagem()
+        atualizarLayoutParaOrientacao()
+        atualizarUI()
     }
 
     override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
 
-    // MARK: Construção da UI
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        .all
+    }
 
-    private func montarInterface() {
-        // Layout do teclado: 5 linhas × 4 colunas
-        // Linha 1: ⌫  AC  %  ÷
-        // Linha 2: 7  8  9  ×
-        // Linha 3: 4  5  6  −
-        // Linha 4: 1  2  3  +
-        // Linha 5: +/-  0  .  =
-        let linhas: [[(String, CircleButton.Estilo, Selector)]] = [
-            [
-                ("⌫",  .funcao,   #selector(tocouBackspace)),
-                ("AC", .funcao,   #selector(tocouAC)),
-                ("%",  .funcao,   #selector(tocouPercentual)),
-                ("÷",  .operacao, #selector(tocouOperacao(_:))),
-            ],
-            [
-                ("7", .numero,   #selector(tocouDigito(_:))),
-                ("8", .numero,   #selector(tocouDigito(_:))),
-                ("9", .numero,   #selector(tocouDigito(_:))),
-                ("×", .operacao, #selector(tocouOperacao(_:))),
-            ],
-            [
-                ("4", .numero,   #selector(tocouDigito(_:))),
-                ("5", .numero,   #selector(tocouDigito(_:))),
-                ("6", .numero,   #selector(tocouDigito(_:))),
-                ("−", .operacao, #selector(tocouOperacao(_:))),
-            ],
-            [
-                ("1", .numero,   #selector(tocouDigito(_:))),
-                ("2", .numero,   #selector(tocouDigito(_:))),
-                ("3", .numero,   #selector(tocouDigito(_:))),
-                ("+", .operacao, #selector(tocouOperacao(_:))),
-            ],
-            [
-                ("+/-", .funcao,   #selector(tocouSinal)),
-                ("0",   .numero,   #selector(tocouDigito(_:))),
-                (".",   .numero,   #selector(tocouDigito(_:))),
-                ("=",   .operacao, #selector(tocouIgual)),
-            ],
-        ]
+    override func viewWillTransition(to size: CGSize,
+                                     with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate(alongsideTransition: { _ in
+            self.atualizarLayoutParaOrientacao(size: size)
+        })
+    }
 
-        // Stack das linhas
-        let stackTeclado = UIStackView()
-        stackTeclado.axis = .vertical
-        stackTeclado.distribution = .fillEqually
-        stackTeclado.spacing = 14
-        stackTeclado.translatesAutoresizingMaskIntoConstraints = false
+    // MARK: Montagem do topo
 
-        for linhaConfig in linhas {
-            let stackLinha = UIStackView()
-            stackLinha.axis = .horizontal
-            stackLinha.distribution = .fillEqually
-            stackLinha.spacing = 14
+    private func montarTopo() {
+        let barraTopo = UIStackView(arrangedSubviews: [lblIndicadores, btnHistorico])
+        barraTopo.axis = .horizontal
+        barraTopo.distribution = .equalSpacing
+        barraTopo.alignment = .center
 
-            for (titulo, estilo, acao) in linhaConfig {
-                let botao = CircleButton(titulo: titulo, estilo: estilo)
-                botao.addTarget(self, action: acao, for: .touchUpInside)
-                botao.heightAnchor.constraint(equalTo: botao.widthAnchor).isActive = true
-                stackLinha.addArrangedSubview(botao)
-            }
-            stackTeclado.addArrangedSubview(stackLinha)
-        }
-
-        // Labels
-        lblExpressao.translatesAutoresizingMaskIntoConstraints = false
-        lblDisplay.translatesAutoresizingMaskIntoConstraints = false
-
-        view.addSubview(lblExpressao)
-        view.addSubview(lblDisplay)
-        view.addSubview(stackTeclado)
+        topStack = UIStackView(arrangedSubviews: [barraTopo, lblExpressao, lblDisplay])
+        topStack.axis = .vertical
+        topStack.spacing = 6
+        topStack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(topStack)
 
         let safe = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
-            stackTeclado.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 16),
-            stackTeclado.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -16),
-            stackTeclado.bottomAnchor.constraint(equalTo: safe.bottomAnchor, constant: -16),
-
-            lblDisplay.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 24),
-            lblDisplay.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -24),
-            lblDisplay.bottomAnchor.constraint(equalTo: stackTeclado.topAnchor, constant: -24),
-
-            lblExpressao.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 24),
-            lblExpressao.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -24),
-            lblExpressao.bottomAnchor.constraint(equalTo: lblDisplay.topAnchor, constant: -8),
+            topStack.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 20),
+            topStack.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -20),
+            topStack.topAnchor.constraint(equalTo: safe.topAnchor, constant: 4),
+            btnHistorico.widthAnchor.constraint(equalToConstant: 32),
+            btnHistorico.heightAnchor.constraint(equalToConstant: 32),
         ])
+
+        // Swipe no display = backspace
+        let swipeL = UISwipeGestureRecognizer(target: self, action: #selector(swipeDisplay))
+        swipeL.direction = .left
+        let swipeR = UISwipeGestureRecognizer(target: self, action: #selector(swipeDisplay))
+        swipeR.direction = .right
+        lblDisplay.isUserInteractionEnabled = true
+        lblDisplay.addGestureRecognizer(swipeL)
+        lblDisplay.addGestureRecognizer(swipeR)
     }
 
-    // MARK: Ações dos botões
+    // MARK: Teclado retrato
+
+    private struct Tecla {
+        let titulo: String
+        let estilo: CircleButton.Estilo
+        let acao: Selector
+        var widthRatio: CGFloat = 1   // para o "0" duplo no retrato
+    }
+
+    private func montarTecladoRetrato() {
+        let linhas: [[Tecla]] = [
+            [
+                Tecla(titulo: "AC", estilo: .funcao, acao: #selector(tocouLimpar)),
+                Tecla(titulo: "+/-", estilo: .funcao, acao: #selector(tocouSinal)),
+                Tecla(titulo: "%",  estilo: .funcao, acao: #selector(tocouPercentual)),
+                Tecla(titulo: "÷",  estilo: .operacao, acao: #selector(tocouOperacao(_:))),
+            ],
+            [
+                Tecla(titulo: "7", estilo: .numero,  acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "8", estilo: .numero,  acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "9", estilo: .numero,  acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "×", estilo: .operacao, acao: #selector(tocouOperacao(_:))),
+            ],
+            [
+                Tecla(titulo: "4", estilo: .numero,  acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "5", estilo: .numero,  acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "6", estilo: .numero,  acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "−", estilo: .operacao, acao: #selector(tocouOperacao(_:))),
+            ],
+            [
+                Tecla(titulo: "1", estilo: .numero,  acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "2", estilo: .numero,  acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "3", estilo: .numero,  acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "+", estilo: .operacao, acao: #selector(tocouOperacao(_:))),
+            ],
+            [
+                Tecla(titulo: "0", estilo: .numero,  acao: #selector(tocouDigito(_:)), widthRatio: 2),
+                Tecla(titulo: ".", estilo: .numero,  acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "=", estilo: .operacao, acao: #selector(tocouIgual)),
+            ],
+        ]
+
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.distribution = .fillEqually
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+
+        let safe = view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -16),
+            stack.bottomAnchor.constraint(equalTo: safe.bottomAnchor, constant: -16),
+        ])
+
+        for linha in linhas {
+            let h = UIStackView()
+            h.axis = .horizontal
+            h.spacing = 14
+            h.distribution = .fill
+            for tecla in linha {
+                let btn = CircleButton(titulo: tecla.titulo, estilo: tecla.estilo, pillShape: tecla.widthRatio > 1)
+                btn.addTarget(self, action: tecla.acao, for: .touchUpInside)
+                h.addArrangedSubview(btn)
+                if tecla.widthRatio == 1 {
+                    btn.heightAnchor.constraint(equalTo: btn.widthAnchor).isActive = true
+                } else {
+                    // botão "0" alongado
+                    btn.heightAnchor.constraint(equalTo: btn.widthAnchor, multiplier: 1 / tecla.widthRatio).isActive = true
+                }
+                if tecla.titulo == "AC" { teclaACClear = btn }
+                registrarBotaoOperacao(btn, titulo: tecla.titulo)
+            }
+            // Forçar larguras iguais entre botões "single" para alinhamento
+            let single = h.arrangedSubviews.filter { ($0 as? CircleButton)?.title(for: .normal) != "0" }
+            for v in single.dropFirst() {
+                v.widthAnchor.constraint(equalTo: single[0].widthAnchor).isActive = true
+            }
+            stack.addArrangedSubview(h)
+        }
+        stackRetrato = stack
+    }
+
+    // MARK: Teclado paisagem (científico)
+
+    private func montarTecladoPaisagem() {
+        // 5 linhas × 10 colunas
+        let linhas: [[Tecla]] = [
+            [
+                Tecla(titulo: "(", estilo: .cientifico, acao: #selector(tocouAbreParen)),
+                Tecla(titulo: ")", estilo: .cientifico, acao: #selector(tocouFechaParen)),
+                Tecla(titulo: "mc", estilo: .cientifico, acao: #selector(tocouMC)),
+                Tecla(titulo: "m+", estilo: .cientifico, acao: #selector(tocouMPlus)),
+                Tecla(titulo: "m−", estilo: .cientifico, acao: #selector(tocouMMinus)),
+                Tecla(titulo: "mr", estilo: .cientifico, acao: #selector(tocouMR)),
+                Tecla(titulo: "AC", estilo: .funcao, acao: #selector(tocouLimpar)),
+                Tecla(titulo: "+/-", estilo: .funcao, acao: #selector(tocouSinal)),
+                Tecla(titulo: "%",  estilo: .funcao, acao: #selector(tocouPercentual)),
+                Tecla(titulo: "÷",  estilo: .operacao, acao: #selector(tocouOperacao(_:))),
+            ],
+            [
+                Tecla(titulo: "2nd", estilo: .cientifico, acao: #selector(tocouSegunda)),
+                Tecla(titulo: "x²",  estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "x³",  estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "xʸ",  estilo: .cientifico, acao: #selector(tocouOperacao(_:))),
+                Tecla(titulo: "eˣ",  estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "10ˣ", estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "7",   estilo: .numero,    acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "8",   estilo: .numero,    acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "9",   estilo: .numero,    acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "×",   estilo: .operacao,  acao: #selector(tocouOperacao(_:))),
+            ],
+            [
+                Tecla(titulo: "1/x",  estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "²√x",  estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "³√x",  estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "ʸ√x",  estilo: .cientifico, acao: #selector(tocouOperacao(_:))),
+                Tecla(titulo: "ln",   estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "log",  estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "4",    estilo: .numero,    acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "5",    estilo: .numero,    acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "6",    estilo: .numero,    acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "−",    estilo: .operacao,  acao: #selector(tocouOperacao(_:))),
+            ],
+            [
+                Tecla(titulo: "x!",   estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "sin",  estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "cos",  estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "tan",  estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "e",    estilo: .cientifico, acao: #selector(tocouConstante(_:))),
+                Tecla(titulo: "EE",   estilo: .cientifico, acao: #selector(tocouOperacao(_:))),
+                Tecla(titulo: "1",    estilo: .numero,    acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "2",    estilo: .numero,    acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "3",    estilo: .numero,    acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "+",    estilo: .operacao,  acao: #selector(tocouOperacao(_:))),
+            ],
+            [
+                Tecla(titulo: "Rad",  estilo: .cientifico, acao: #selector(tocouRadDeg)),
+                Tecla(titulo: "sinh", estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "cosh", estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "tanh", estilo: .cientifico, acao: #selector(tocouUnaria(_:))),
+                Tecla(titulo: "π",    estilo: .cientifico, acao: #selector(tocouConstante(_:))),
+                Tecla(titulo: "Rand", estilo: .cientifico, acao: #selector(tocouConstante(_:))),
+                Tecla(titulo: "0",    estilo: .numero,    acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: ".",    estilo: .numero,    acao: #selector(tocouDigito(_:))),
+                Tecla(titulo: "=",    estilo: .operacao,  acao: #selector(tocouIgual), widthRatio: 2),
+            ],
+        ]
+
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.distribution = .fillEqually
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.isHidden = true
+        view.addSubview(stack)
+
+        let safe = view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -8),
+            stack.bottomAnchor.constraint(equalTo: safe.bottomAnchor, constant: -8),
+        ])
+
+        for linha in linhas {
+            let h = UIStackView()
+            h.axis = .horizontal
+            h.spacing = 8
+            h.distribution = .fill
+            var primeiroSimples: UIView?
+            for tecla in linha {
+                let btn = CircleButton(titulo: tecla.titulo, estilo: tecla.estilo, pillShape: true)
+                btn.addTarget(self, action: tecla.acao, for: .touchUpInside)
+                h.addArrangedSubview(btn)
+                if tecla.widthRatio > 1 {
+                    btn.widthAnchor.constraint(equalTo: (primeiroSimples ?? btn).widthAnchor,
+                                               multiplier: tecla.widthRatio).isActive = true
+                } else {
+                    if let p = primeiroSimples {
+                        btn.widthAnchor.constraint(equalTo: p.widthAnchor).isActive = true
+                    } else {
+                        primeiroSimples = btn
+                    }
+                }
+                if tecla.titulo == "AC" { teclaACClear = btn }
+                if tecla.titulo == "2nd" { teclaSegunda = btn }
+                if tecla.titulo == "Rad" { teclaRadDeg = btn }
+                if ["sin","cos","tan","sinh","cosh","tanh"].contains(tecla.titulo) {
+                    botoesUnariosTrig[tecla.titulo] = btn
+                }
+                registrarBotaoOperacao(btn, titulo: tecla.titulo)
+            }
+            stack.addArrangedSubview(h)
+        }
+        stackPaisagem = stack
+    }
+
+    private func registrarBotaoOperacao(_ btn: CircleButton, titulo: String) {
+        let opTitles = ["÷", "×", "−", "+", "xʸ", "ʸ√x", "EE"]
+        if opTitles.contains(titulo) {
+            // último botão registrado vence (em paisagem sobrescreve retrato e vice-versa)
+            // por isso usamos array; aqui simplifico mantendo só um por título visível
+            botoesOperacao[titulo] = btn
+        }
+    }
+
+    // MARK: Layout dinâmico por orientação
+
+    private func atualizarLayoutParaOrientacao(size: CGSize? = nil) {
+        let s = size ?? view.bounds.size
+        let paisagem = s.width > s.height
+        stackRetrato?.isHidden = paisagem
+        stackPaisagem?.isHidden = !paisagem
+
+        // Ajusta tamanho da fonte do display
+        lblDisplay.font = .systemFont(ofSize: paisagem ? 56 : 80, weight: .light)
+        lblExpressao.font = .systemFont(ofSize: paisagem ? 18 : 24, weight: .light)
+    }
+
+    // MARK: - Ações dos botões
 
     @objc private func tocouDigito(_ sender: UIButton) {
-        guard let digito = sender.currentTitle else { return }
-
-        if digitandoNumeroNovo {
-            lblDisplay.text = (digito == ".") ? "0." : digito
-            digitandoNumeroNovo = false
-        } else {
-            let atual = lblDisplay.text ?? "0"
-            // não permite mais de um ponto
-            if digito == "." && atual.contains(".") { return }
-            // limita tamanho para não estourar a tela
-            if atual.count >= 12 { return }
-            lblDisplay.text = atual + digito
-        }
+        guard let t = sender.currentTitle else { return }
+        engine.digitar(t)
+        atualizarUI()
     }
 
     @objc private func tocouOperacao(_ sender: UIButton) {
-        guard
-            let titulo = sender.currentTitle,
-            let novaOp = Operacao(rawValue: titulo)
-        else { return }
-
-        // Se já existe um número anterior e o usuário acabou de digitar, calcula primeiro
-        if let anterior = valorAnterior, let pendente = operacaoPendente, !digitandoNumeroNovo {
-            let atual = valorAtual()
-            let resultado = pendente.aplicar(anterior, atual)
-            lblDisplay.text = formatar(resultado)
-            valorAnterior = resultado
-        } else {
-            valorAnterior = valorAtual()
+        guard let t = sender.currentTitle else { return }
+        let op: CalculatorEngine.OperacaoBinaria
+        switch t {
+        case "+":   op = .soma
+        case "−":   op = .subtracao
+        case "×":   op = .multiplicacao
+        case "÷":   op = .divisao
+        case "xʸ":  op = .potencia
+        case "ʸ√x": op = .raizN
+        case "EE":  op = .ee
+        default: return
         }
-
-        operacaoPendente = novaOp
-        digitandoNumeroNovo = true
-        lblExpressao.text = "\(formatar(valorAnterior ?? 0)) \(titulo)"
+        engine.definirOperacao(op)
+        operacaoDestacada = t
+        atualizarUI()
     }
 
     @objc private func tocouIgual() {
-        guard let anterior = valorAnterior, let op = operacaoPendente else { return }
-        let atual = valorAtual()
-        let resultado = op.aplicar(anterior, atual)
-        lblExpressao.text = "\(formatar(anterior)) \(op.rawValue) \(formatar(atual))"
-        lblDisplay.text = formatar(resultado)
-        valorAnterior = nil
-        operacaoPendente = nil
-        digitandoNumeroNovo = true
+        engine.igual()
+        operacaoDestacada = nil
+        atualizarUI()
     }
 
-    @objc private func tocouAC() {
-        lblDisplay.text = "0"
-        lblExpressao.text = " "
-        valorAnterior = nil
-        operacaoPendente = nil
-        digitandoNumeroNovo = true
-    }
-
-    @objc private func tocouBackspace() {
-        guard !digitandoNumeroNovo else { return }
-        var texto = lblDisplay.text ?? "0"
-        if texto.count > 1 {
-            texto.removeLast()
-            // se sobrar só "-" trata como zero
-            if texto == "-" { texto = "0"; digitandoNumeroNovo = true }
+    @objc private func tocouLimpar() {
+        // AC limpa tudo; C apenas o display (quando há entrada em curso)
+        if teclaACClear?.title(for: .normal) == "C" {
+            engine.limparEntrada()
         } else {
-            texto = "0"
-            digitandoNumeroNovo = true
+            engine.limparTudo()
         }
-        lblDisplay.text = texto
-    }
-
-    @objc private func tocouPercentual() {
-        let valor = valorAtual() / 100
-        lblDisplay.text = formatar(valor)
+        operacaoDestacada = nil
+        atualizarUI()
     }
 
     @objc private func tocouSinal() {
-        let valor = -valorAtual()
-        lblDisplay.text = formatar(valor)
+        engine.aplicarUnaria("+/-")
+        atualizarUI()
     }
 
-    // MARK: Helpers
-
-    private func valorAtual() -> Double {
-        return Double(lblDisplay.text ?? "0") ?? 0
+    @objc private func tocouPercentual() {
+        engine.aplicarUnaria("%")
+        atualizarUI()
     }
 
-    private func formatar(_ valor: Double) -> String {
-        // Mostra inteiros sem .0; senão usa precisão razoável
-        if valor.truncatingRemainder(dividingBy: 1) == 0,
-           abs(valor) < 1e15 {
-            return String(format: "%.0f", valor)
+    @objc private func tocouUnaria(_ sender: UIButton) {
+        guard var t = sender.currentTitle else { return }
+        // Se 2nd está ativa e for trig, mapear para a inversa
+        if engine.modoSegunda {
+            switch t {
+            case "sin":  t = "sin⁻¹"
+            case "cos":  t = "cos⁻¹"
+            case "tan":  t = "tan⁻¹"
+            case "sinh": t = "sinh⁻¹"
+            case "cosh": t = "cosh⁻¹"
+            case "tanh": t = "tanh⁻¹"
+            default: break
+            }
         }
-        // Formatação com até 8 dígitos significativos, removendo zeros à direita
-        let s = String(format: "%.8f", valor)
-        if s.contains(".") {
-            return s.trimmingTrailingZeros()
+        engine.aplicarUnaria(t)
+        atualizarUI()
+    }
+
+    @objc private func tocouConstante(_ sender: UIButton) {
+        guard let t = sender.currentTitle else { return }
+        engine.inserirConstante(t)
+        atualizarUI()
+    }
+
+    @objc private func tocouAbreParen() {
+        engine.abrirParenteses()
+        atualizarUI()
+    }
+
+    @objc private func tocouFechaParen() {
+        engine.fecharParenteses()
+        atualizarUI()
+    }
+
+    @objc private func tocouMC()    { engine.memoriaLimpar();    atualizarUI() }
+    @objc private func tocouMPlus() { engine.memoriaSomar();     atualizarUI() }
+    @objc private func tocouMMinus(){ engine.memoriaSubtrair();  atualizarUI() }
+    @objc private func tocouMR()    { engine.memoriaRecuperar(); atualizarUI() }
+
+    @objc private func tocouSegunda() {
+        engine.modoSegunda.toggle()
+        teclaSegunda?.definirSelecionado(engine.modoSegunda)
+        // Trocar títulos dos botões de trig
+        for (nome, btn) in botoesUnariosTrig {
+            let novoTitulo: String
+            if engine.modoSegunda {
+                novoTitulo = nome + "⁻¹"
+            } else {
+                novoTitulo = nome
+            }
+            btn.setTitle(novoTitulo, for: .normal)
         }
-        return s
+    }
+
+    @objc private func tocouRadDeg() {
+        engine.modoAngulo = (engine.modoAngulo == .graus) ? .radianos : .graus
+        atualizarUI()
+    }
+
+    @objc private func swipeDisplay() {
+        engine.backspace()
+        atualizarUI()
+    }
+
+    @objc private func tocouHistorico() {
+        let vc = HistoryViewController(itens: engine.historico)
+        vc.delegate = self
+        let nav = UINavigationController(rootViewController: vc)
+        nav.modalPresentationStyle = .pageSheet
+        present(nav, animated: true)
+    }
+
+    // MARK: Atualização de UI
+
+    private func atualizarUI() {
+        lblDisplay.text = engine.displayText
+        lblExpressao.text = engine.expressaoText.isEmpty ? " " : engine.expressaoText
+
+        // Indicadores: M (memória), Rad/Deg
+        var partes: [String] = []
+        if engine.temMemoria { partes.append("M") }
+        partes.append(engine.modoAngulo == .graus ? "Deg" : "Rad")
+        lblIndicadores.text = partes.joined(separator: "  ")
+
+        // Atualiza botão Rad/Deg
+        teclaRadDeg?.setTitle(engine.modoAngulo == .graus ? "Rad" : "Deg", for: .normal)
+
+        // Texto do AC/C
+        let titulo = (engine.displayText == "0" && engine.expressaoText.isEmpty) ? "AC" : "C"
+        teclaACClear?.setTitle(titulo, for: .normal)
+
+        // Destacar operação pendente
+        for (nome, btn) in botoesOperacao {
+            btn.definirSelecionado(nome == operacaoDestacada)
+        }
     }
 }
 
-private extension String {
-    func trimmingTrailingZeros() -> String {
-        var s = self
-        while s.last == "0" { s.removeLast() }
-        if s.last == "." { s.removeLast() }
-        return s
+// MARK: - Delegate do histórico
+
+extension ViewController: HistoryViewControllerDelegate {
+    func historyDidSelect(_ item: HistoricoItem) {
+        engine.recuperarHistorico(item)
+        atualizarUI()
+    }
+
+    func historyDidRequestClear() {
+        engine.limparHistorico()
     }
 }
